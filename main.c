@@ -1,9 +1,9 @@
-#include "common.h"
-#include "stm8s.h"
-#include "stm8s_clk.h"
-#include "stm8s_adc1.h"
-#include <iostm8s003f3.h>
+#include <stm8s.h>
+#include <stm8s_clk.h>
+#include <stm8s_adc1.h>
 #include <math.h>
+#include <stm8s_it.h>
+#include "common.h"
 
 #define DP_ACTIVITY_THRESHOLD 81
 #define PWM_FRQ_DIVIDER 0x2000
@@ -16,7 +16,7 @@
 #define is_tout (!tim4_tout)
 #define tim1_reset TIM1_DeInit
 #define tim2_reset TIM2_DeInit
-#define PWMCAP_CURRENT_STATE (PC_IDR_bit.IDR6 ? 1 : 0)
+#define PWMCAP_CURRENT_STATE (!!(GPIOC->IDR & BIT6))
 #define led_enable(on) (PB_ODR_ODR5 = !(on))
 
 static u8 dp_active = 0;
@@ -35,7 +35,7 @@ static void spin_sleep(u16 q)
     while (--q)
     {
         for (u16 i = 0; i<29000; i++)
-            __no_operation();
+            nop();
     }
 }
 
@@ -44,44 +44,44 @@ static void spin_sleep_fast(u16 q)
     while (--q)
     {
         for (u16 i = 0; i<128; i++)
-            __no_operation();
+            nop();
     }
 }
 
 // init sysclk to run at 16MHz using the internal oscillator
 static void sysclk_init(void)
 {
-    CLK_ICKR = 0; // reset the Internal Clock Register.
-    CLK_ICKR_HSIEN = 1; // Enable the HSI
-    CLK_ECKR = 0; // disable the external clock
-    while (!CLK_ICKR_HSIRDY); // wait for the HSI to be ready for use
-    CLK_CKDIVR_bit.HSIDIV = 1; // F(hsi) = F(cpu)/2
-    CLK_CKDIVR_bit.CPUDIV = 0; // ensure the clocks are running at full speed
-    CLK_PCKENR1 = 0xFF; // enable all peripheral clocks
-    CLK_PCKENR2 = 0xFF; // ditto
-    CLK_CCOR = 0; // turn off CCO
-    CLK_HSITRIMR = 0; // turn off any HSIU trimming
-    CLK_SWIMCCR = 0; // set SWIM to run at clock/2
-    CLK_SWR = 0xE1; // use HSI as the clock source
-    CLK_SWCR = 0; // reset the clock switch control register
-    CLK_SWCR_SWEN = 1; // enable switching
-    while (CLK_SWCR_SWBSY); // pause while the clock switch is busy
+    CLK->ICKR = 0; // reset the Internal Clock Register.
+    bset(CLK->ICKR, CLK_ICKR_HSIEN, 1); // Enable the HSI
+    CLK->ECKR = 0; // disable the external clock
+    while (!(CLK->ICKR&CLK_ICKR_HSIRDY)); // wait for the HSI to be ready for use
+    mset(CLK->CKDIVR, CLK_CKDIVR_HSIDIV, CLK_PRESCALER_HSIDIV8); // F(hsi) = F(cpu)/2
+    mset(CLK->CKDIVR, CLK_CKDIVR_CPUDIV, 0); // ensure the clocks are running at full speed
+    CLK->PCKENR1 = 0xFF; // enable all peripheral clocks
+    CLK->PCKENR2 = 0xFF; // ditto
+    CLK->CCOR = 0; // turn off CCO
+    CLK->HSITRIMR = 0; // turn off any HSIU trimming
+    CLK->SWIMCCR = 0; // set SWIM to run at clock/2
+    CLK->SWR = 0xE1; // use HSI as the clock source
+    CLK->SWCR = 0; // reset the clock switch control register
+    bset(CLK->SWCR, CLK_SWCR_SWEN, 1); // enable switching
+    while (CLK->SWCR & CLK_SWCR_SWBSY); // pause while the clock switch is busy
 }
 
 // TIM1_CH1 pwm output
 static void tim1_setup_pwm_gen(u16 prescaler, u16 frq_div, u16 duty)
 {
-    TIM1_PSCRH = prescaler >> 8;
-    TIM1_PSCRL = prescaler & 0xFF;
-    TIM1_ARRH = frq_div >> 8; // High byte of freq_div
-    TIM1_ARRL = frq_div & 0xFF; // Low byte of freq_div
+    TIM1->PSCRH = prescaler >> 8;
+    TIM1->PSCRL = prescaler & 0xFF;
+    TIM1->ARRH = frq_div >> 8; // High byte of freq_div
+    TIM1->ARRL = frq_div & 0xFF; // Low byte of freq_div
 #if 1 // channel 1
-    TIM1_CCR1H = duty >> 8; // High byte of duty
-    TIM1_CCR1L = duty & 0xFF; // Low byte of duty
-    TIM1_CCER1_CC1P = 0; // Active high
-    TIM1_CCER1_CC1E = 1; // Enable compare mode for channel 1
+    TIM1->CCR1H = duty >> 8; // High byte of duty
+    TIM1->CCR1L = duty & 0xFF; // Low byte of duty
+    bset(TIM1->CCER1, TIM1_CCER1_CC1P, 0); // Active high
+    bset(TIM1->CCER1, TIM1_CCER1_CC1E, 1); // Enable compare mode for channel 1
     // PWM Mode 1 - active if counter < CCR1, inactive otherwise
-    TIM1_CCMR1_OC1M = 6;
+    mset(TIM1->CCMR1, TIM1_CCMR_OCM, TIM1_OCMODE_PWM1);
 #else // channel 2
     TIM1_CCR2H = duty >> 8; // High byte of duty
     TIM1_CCR2L = duty & 0xFF; // Low byte of duty
@@ -96,9 +96,9 @@ static void tim1_setup_pwm_gen(u16 prescaler, u16 frq_div, u16 duty)
 // TIM2_CH2 pwm capture
 void tim2_pwmgen_init(u8 prescaler, u16 frq_div, u16 duty)
 {
-    TIM2_PSCR = prescaler; // Prescaler = 2^0 = 1
-    TIM2_ARRH = frq_div >> 8; // High byte of freq_div
-    TIM2_ARRL = frq_div & 0xFF; // Low byte of freq_div
+    TIM2->PSCR = prescaler; // Prescaler = 2^0 = 1
+    TIM2->ARRH = frq_div >> 8; // High byte of freq_div
+    TIM2->ARRL = frq_div & 0xFF; // Low byte of freq_div
 #if 0 // channel 1
     TIM2_CCR1H = duty >> 8; // High byte of duty
     TIM2_CCR1L = duty & 0xFF; // Low byte of duty
@@ -107,37 +107,39 @@ void tim2_pwmgen_init(u8 prescaler, u16 frq_div, u16 duty)
     // PWM Mode 1 - active if counter < CCR1, inactive otherwise
     TIM2_CCMR1_OC1M = 6;
 #else // channel 2
-    TIM2_CCR2H = duty >> 8; // High byte of duty
-    TIM2_CCR2L = duty & 0xFF; // Low byte of duty
-    TIM2_CCER1_CC2P = 0; // Active high
-    TIM2_CCER1_CC2E = 1; // Enable compare mode for channel 2
+    TIM2->CCR2H = duty >> 8; // High byte of duty
+    TIM2->CCR2L = duty & 0xFF; // Low byte of duty
+    bset(TIM2->CCER1, TIM2_CCER1_CC2P, 0); // Active high
+    bset(TIM2->CCER1, TIM2_CCER1_CC2E, 1); // Enable compare mode for channel 2
     // PWM Mode 2 - active if counter < CCR1, inactive otherwise
-    TIM2_CCMR2_OC2M = 6;
+    mset(TIM2->CCMR2, TIM2_CCMR_OCM, TIM2_OCMODE_PWM1);
 #endif
-    TIM2_CR1_bit.UDIS = 0;
-    TIM2_IER_bit.UIE = 1; // enable interrupts
+    bset(TIM2->CR1, TIM1_CR1_UDIS, 0);
+    bset(TIM2->IER, TIM1_IER_UIE, 1); // enable interrupts
     TIM2_Cmd(ENABLE); // finally enable the timer
 }
 
 static void tim2_adjust_pwm_gen(u16 duty)
 {
+    if(duty > PWM_FRQ_DIVIDER - PWM_FRQ_DIVIDER/100) // avoid very short dead intervals
+     duty = PWM_FRQ_DIVIDER + 100; // +1 should be enough actually
     tim2_dc = duty;
 }
 
 static void tim1_pwmcap_init(void)
 {
-    TIM1_CR1_bit.DIR = 0; // count up
-    TIM1_CCMR1_bit.CC1S = 1; // [01] set TI2FP1 as an input for CCR1
-    TIM1_CCER1_bit.CC1P = 0; // TI2FP1 is active on rising edge
-    TIM1_CCMR2_bit.CC2S = 2; // [10] set TI1FP2 as an input for CCR2
-    TIM1_CCER1_bit.CC2P = 1; // TI2FP2 is active on falling edge
-    TIM1_SMCR_bit.TS = 5; // [101] select TI1FP1 as trigger input
-    TIM1_SMCR_bit.SMS = 4; // [100]
-    TIM1_CCER1_bit.CC1E = 1; // enable the captures
-    TIM1_CCER1_bit.CC2E = 1;
-    TIM1_IER_bit.CC1IE = 1; // allow CC1 and CC2 capture interrupt
-    TIM1_IER_bit.CC2IE = 1;
-    TIM1_CR1_bit.CEN = 1; // run TIM1
+    bset(TIM1->CR1, TIM1_CR1_DIR, 0); // count up
+    mset(TIM1->CCMR1, TIM1_CCMR_CCxS, 1); // [01] set TI2FP1 as an input for CCR1
+    bset(TIM1->CCER1, TIM1_CCER1_CC1P, 0); // TI2FP1 is active on rising edge
+    mset(TIM1->CCMR2, TIM1_CCMR_CCxS, 2); // [10] set TI1FP2 as an input for CCR2
+    bset(TIM1->CCER1, TIM1_CCER1_CC2P, 1); // TI2FP2 is active on falling edge
+    mset(TIM1->SMCR, TIM1_SMCR_TS, TIM1_TS_TI1FP1); // [101] select TI1FP1 as trigger input
+    mset(TIM1->SMCR, TIM1_SMCR_SMS, TIM1_SLAVEMODE_RESET); // [100]
+    bset(TIM1->CCER1, TIM1_CCER1_CC1E, 1); // enable the captures
+    bset(TIM1->CCER1, TIM1_CCER1_CC2E, 1);
+    bset(TIM1->IER, TIM1_IER_CC1IE, 1); // allow CC1 and CC2 capture interrupt
+    bset(TIM1->IER, TIM1_IER_CC2IE, 1);
+    bset(TIM1->CR1, TIM1_CR1_CEN, 1); // run TIM1
 }
 
 static void tim2_setup_pwm_cap(void)
@@ -158,8 +160,8 @@ static void tim4_tout_init(void)
 {
     TIM4->ARR = 130; // 255 - 125
     TIM4->PSCR = 6; // 8MHz / 64 = 125KHz => 125 updates per millisecond
-    TIM4_IER_bit.UIE = 1;
-    TIM4_CR1_bit.CEN = 1;
+    bset(TIM4->IER, TIM4_IER_UIE, 1);
+    bset(TIM4->CR1, TIM4_CR1_CEN, 1);
 }
 
 /*
@@ -176,43 +178,43 @@ static void tim4_tout_init(void)
 static void compat_init(void)
 {
     // OPT1
-    PC_DDR_bit.DDR7 = 0; // input
-    PC_CR1_bit.C17 = 1; // wpu
+    bset(GPIOC->DDR, BIT7, 0); // input
+    bset(GPIOC->CR1, BIT7, 1); // wpu
     // OPT2
-    PD_DDR_bit.DDR4 = 1; // 1=output
-    PD_CR1_bit.C14 = 1; // 1=push-pull
+    bset(GPIOD->DDR, BIT4, 1); // 1=output
+    bset(GPIOD->CR1, BIT4, 1); // 1=push-pull
     // detect
-    PD_ODR_bit.ODR4 = 0; // drive OPT2 low
-    u8 opt1 = PC_IDR_bit.IDR7; // read OPT1
+    bset(GPIOD->ODR, BIT4, 0); // drive OPT2 low
+    u8 opt1 = GPIOC->IDR & BIT7; // read OPT1
     // low level means OPT1 and OPT2 are bridged
     compat_mode = !opt1;
 }
 
 // [D6] BL_ENABLE_SYS
 static u8 bl_enable_read(void)
-{ return PD_IDR_bit.IDR6; }
+{ return !!(GPIOD->IDR & BIT6); }
 // [A3] BL_ENABLE
 static void bl_enable_write(u8 enable)
-{ PA_ODR_bit.ODR3 = enable; }
+{ bset(GPIOA->ODR, BIT3, enable); }
 
 static void dp_activity_init()
 {
     ADC1_DeInit();
-    ADC_CSR_bit.CH = 2; // AIN2
-    ADC_CR3_bit.DBUF = 0;
-    ADC_CR2_bit.ALIGN = 1; // right aligned data
-    ADC_CSR_bit.EOCIE = 0; // no interrupt after conversion
-    ADC_CR1_bit.ADON = 1; // enable ADC
+    mset(ADC1->CSR, ADC1_CSR_CH, ADC1_CHANNEL_2); // AIN2
+    bset(ADC1->CR3, ADC1_CR3_DBUF, 0);
+    bset(ADC1->CR2, ADC1_CR2_ALIGN, 1); // right aligned data
+    bset(ADC1->CSR, ADC1_CSR_EOCIE, 0); // no interrupt after conversion
+    bset(ADC1->CR1, ADC1_CR1_ADON, 1); // enable ADC
 }
 
 static u16 dp_activity_read()
 {
-    ADC_CR1_bit.ADON = 1; // read C4 - AIN2
-    while (!ADC_CSR_bit.EOC)
-        __no_operation();
-    u16 drl = ADC_DRL; // read low byte first (right alignment)
-    u16 drh = ADC_DRH;
-    ADC_CSR_bit.EOC = 0;
+    bset(ADC1->CR1, ADC1_CR1_ADON, 1); // read C4 - AIN2
+    while (!(ADC1->CSR & ADC1_CSR_EOC))
+        nop();
+    u16 drl = ADC1->DRL; // read low byte first (right alignment)
+    u16 drh = ADC1->DRH;
+    bset(ADC1->CSR, ADC1_CSR_EOC, 0);
     return drl | (drh<<8);
 }
 
@@ -241,7 +243,7 @@ static void bl_adjust(u8 en, u8 sys_bl, float fdc)
             return;
     }
     static u16 dc = 0;
-    dc = (u16)ceil(fdc*PWM_FRQ_DIVIDER);
+    dc = (u16)ceilf(fdc*PWM_FRQ_DIVIDER);
     bl_defer = 0;
     if (prev_en!=en)
     {
@@ -267,58 +269,38 @@ static void bl_adjust(u8 en, u8 sys_bl, float fdc)
 static void gpio_init(void)
 {
     // setup all pins as inputs with wpu
-    PA_DDR = 0x00; // input=0
-    PA_CR1_bit.C10 = 1; // wpu
-    PA_CR1_bit.C11 = 1; // wpu
-    PA_CR1_bit.C12 = 1; // wpu
-    PA_CR1_bit.C13 = 0; // A3: no wpu
-    PA_CR1_bit.C14 = 1; // wpu
-    PA_CR1_bit.C15 = 1; // wpu
-    PA_CR1_bit.C16 = 1; // wpu
-    PA_CR1_bit.C17 = 1; // wpu
-    PB_DDR = 0x00; // input=0
-    PB_CR1 = 0xff; // wpu
-    PC_DDR = 0x00; // input=0
-    PC_CR1_bit.C10 = 1; // wpu
-    PC_CR1_bit.C11 = 1; // wpu
-    PC_CR1_bit.C12 = 1; // wpu
-    PC_CR1_bit.C13 = 1; // wpu
-    PC_CR1_bit.C14 = 0; // C4:
-    PC_CR1_bit.C15 = 1; // wpu
-    PC_CR1_bit.C16 = 0; // C6:
-    PC_CR1_bit.C17 = 1; // wpu
-    PD_DDR = 0x00; // input=0
-    PD_CR1_bit.C10 = 1; // wpu
-    PD_CR1_bit.C11 = 1; // wpu
-    PD_CR1_bit.C12 = 1; // wpu
-    PD_CR1_bit.C13 = 0; // D3:
-    PD_CR1_bit.C14 = 1; // wpu
-    PD_CR1_bit.C15 = 1; // wpu
-    PD_CR1_bit.C16 = 0; // D6:
-    PD_CR1_bit.C17 = 1; // wpu
+    GPIOA->DDR = 0x00; // input=0
+    GPIOA->CR1 = 0b11110111;
+    GPIOB->DDR = 0x00; // input=0
+    GPIOB->CR1 = 0xff; // wpu
+    GPIOC->DDR = 0x00; // input=0
+    GPIOC->CR1 = 0b10101111;
+    GPIOD->DDR = 0x00; // input=0
+    GPIOD->CR1 = 0b10110111;
     // setup backlight pins
     // D3: backlight control (output)
-    PD_DDR_bit.DDR3 = 1; // 1=output
-    PD_CR1_bit.C13 = 1; // 1=push-pull
-    PD_CR2_bit.C23 = 1; // high-speed output
+
+    bset(GPIOD->DDR, BIT3, 1); // 1=output
+    bset(GPIOD->CR1, BIT3, 1); // 1=push-pull
+    bset(GPIOD->CR2, BIT3, 1); // high-speed output
     // A3: backlight enable (output)
-    PA_DDR_bit.DDR3 = 1; // 1=output
-    PA_CR1_bit.C13 = 1; // 1=push-pull 0=open-drain
-    PA_ODR_bit.ODR3 = 0; // disable by default
+    bset(GPIOA->DDR, BIT3, 1); // 1=output
+    bset(GPIOA->CR1, BIT3, 1); // 1=push-pull 0=open-drain
+    bset(GPIOA->ODR, BIT3, 0); // disable by default
     // C6: system backlight control (input) [TIM1_CH1]
-    PC_DDR_bit.DDR6 = 0; // 0=input
-    PC_CR1_bit.C16 = 0; // 0=no_wpu
+    bset(GPIOC->DDR, BIT6, 0); // 0=input
+    bset(GPIOC->CR1, BIT6, 0); // 0=no_wpu
     // D6: system backlight enable (input)
-    PD_DDR_bit.DDR6 = 0; // 0=input
-    PD_CR1_bit.C16 = 0; // 0=no_wpu
+    bset(GPIOD->DDR, BIT6, 0); // 0=input
+    bset(GPIOD->CR1, BIT6, 0); // 0=no_wpu
     // C4: DP activity (input)
-    PC_DDR_bit.DDR4 = 0; // 0=input
-    PC_CR1_bit.C14 = 0; // 0=no_wpu
+    bset(GPIOC->DDR, BIT4, 0); // 0=input
+    bset(GPIOC->CR1, BIT4, 0); // 0=no_wpu
 }
 
 void main(void)
 {
-    __disable_interrupt();
+    disableInterrupts();
     compat_init();
     gpio_init();
     sysclk_init();
@@ -328,7 +310,7 @@ void main(void)
     tim2_pwmgen_init(0, PWM_FRQ_DIVIDER, 0); // init with zero duty cycle
     tim4_tout_init();
     dp_activity_init();
-    __enable_interrupt();
+    enableInterrupts();
     while (1)
     {
         spin_sleep_fast(1);
@@ -384,6 +366,7 @@ void main(void)
 }
 
 #ifdef USE_FULL_ASSERT
+#pragma disable_warning 85
 void assert_failed(u8* file, u32 line)
 {
     while (1);

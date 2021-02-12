@@ -1,7 +1,6 @@
-#include "stm8s_it.h"
+#include <stm8s_it.h>
+#include <stm8s_tim1.h>
 #include "common.h"
-#include <iostm8s003f3.h>
-#include "stm8s_tim1.h"
 
 #ifdef _COSMIC_
 // Dummy Interrupt routine
@@ -130,9 +129,9 @@ INTERRUPT_HANDLER(TIM5_CAP_COM_IRQHandler, 14)
 INTERRUPT_HANDLER(TIM2_UPD_OVF_BRK_IRQHandler, 13)
 {
    const u16 dc = tim2_dc;
-   TIM2_CCR2H = dc>>8;
-   TIM2_CCR2L = dc&0xFF;
-   TIM2_SR1_bit.UIF = 0;
+   TIM2->CCR2H = dc>>8;
+   TIM2->CCR2L = dc&0xFF;
+   bset(TIM2->SR1, TIM2_SR1_UIF, 0);
 }
 
 // Timer2 Capture/Compare Interrupt routine
